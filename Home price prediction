@@ -1,0 +1,150 @@
+#################### 11.68
+
+library(data.table)  
+library(h2o)
+library(caret)
+library(dplyr)
+library(DataExplorer)
+
+train <- fread("train.csv", stringsAsFactors = T)
+test  <- fread("test.csv", stringsAsFactors = T)
+
+df<-train
+
+cleanData <- function( df ) {
+  # Convert pseudo-numeric "type of dwelling" identifier to a factor
+  df$MSSubClass <- as.factor( df$MSSubClass )
+  
+  # Deal with numeric variables that have missing values
+  df$LotFrontage = as.character( df$LotFrontage )
+  df$HasLotFrontage = ifelse( df$LotFrontage=="NA", 0, 1 )
+  df$LotFrontage = ifelse( df$LotFrontage=="NA", "0", df$LotFrontage ) 
+  df$LotFrontage = as.numeric( df$LotFrontage )
+  
+  df$MasVnrArea = as.character( df$MasVnrArea )
+  df$HasMasVnr = ifelse( df$MasVnrArea=="NA", 0, 1 )
+  df$MasVnrArea = ifelse( df$MasVnrArea=="NA", "0", df$MasVnrArea ) 
+  df$MasVnrArea = as.numeric( df$MasVnrArea )
+  
+  df$GarageYrBlt = as.character( df$GarageYrBlt )
+  df$HasGarageYr = ifelse( df$GarageYrBlt=="NA", 0, 1 )
+  df$GarageYrBlt = ifelse( df$GarageYrBlt=="NA", "0", df$GarageYrBlt ) 
+  df$GarageYrBlt = as.numeric( df$GarageYrBlt )
+  
+  # Dummy for "has basement"
+  df$HasBasement = ifelse( df$BsmtQual=="NA", 0, 1 )
+  
+  # Recode ordered factors as pseudo-continuous numerical variables
+  qualcats  = c( "Po",  "Fa",  "TA",   "Gd",   "Ex" )
+  qualcats2 = c( "NA",  qualcats )
+  funcats   = c( "Sal", "Sev", "Maj2", "Maj1", "Mod", "Min2", "Min1", "Typ" )
+  basecats  = c( "NA",  "Unf", "LwQ",  "Rec",  "BLQ", "ALQ",  "GLQ"         )
+  df <- recode( df, "ExterCond",    qualcats  )
+  df <- recode( df, "ExterQual",    qualcats  )
+  df <- recode( df, "HeatingQC",    qualcats  )
+  df <- recode( df, "KitchenQual",  qualcats  )
+  df <- recode( df, "BsmtCond",     qualcats2 )
+  df <- recode( df, "FireplaceQu",  qualcats2 )
+  df <- recode( df, "GarageQual",   qualcats2 )
+  df <- recode( df, "GarageCond",   qualcats2 )
+  df <- recode( df, "Functional",   funcats   )
+  df <- recode( df, "BsmtFinType1", basecats  )
+  df <- recode( df, "BsmtFinType2", basecats  )
+  df <- recode( df, "PavedDrive",   c("N",   "P",      "Y"                     ) )                                         
+  df <- recode( df, "Utilities",    c("ELO", "NoSeWa", "NoSewr", "AllPub"      ) )
+  df <- recode( df, "LotShape",     c("IR3", "IR2",    "IR1",    "Reg"         ) )                                         
+  df <- recode( df, "BsmtExposure", c("NA",  "No",     "Mn",     "Av",    "Gd" ) )
+  df <- recode( df, "PoolQC",       c("NA",  "Fa",     "TA",     "Gd",    "Ex" ) )
+  df <- recode( df, "GarageFinish", c("NA",  "Unf",    "RFn",    "Fin"         ) )
+  
+  # BsmtHeight needs special treatment, since it's really a categorized continuous variable
+  from <- c("NA", "Po", "Fa", "TA", "Gd", "Ex"  ) 
+  to   <- c("0",  "50", "75", "85", "95", "120" )                                          
+  df$BsmtHeight <- as.numeric( mapvalues(df$BsmtQual, from=from, to=to) )
+  df$BsmtQual <- NULL
+  
+  # Fix numeric variables that will get read as factors in test set
+  df$BsmtFinSF1 = as.numeric( as.character( df$BsmtFinSF1 ) )
+  df$BsmtFinSF1[is.na(df$BsmtFinSF1)] = mean(df$BsmtFinSF1, na.rm=TRUE)
+  df$BsmtFinSF2 = as.numeric( as.character( df$BsmtFinSF2 ) )
+  df$BsmtFinSF2[is.na(df$BsmtFinSF2)] = mean(df$BsmtFinSF2, na.rm=TRUE)
+  df$BsmtUnfSF = as.numeric( as.character( df$BsmtUnfSF ) )
+  df$BsmtUnfSF[is.na(df$BsmtUnfSF)] = mean(df$BsmtUnfSF, na.rm=TRUE)
+  df$BsmtFullBath = as.numeric( as.character( df$BsmtFullBath ) )
+  df$BsmtFullBath[is.na(df$BsmtFullBath)] = mean(df$BsmtFullBath, na.rm=TRUE)
+  df$BsmtHalfBath = as.numeric( as.character( df$BsmtHalfBath ) )
+  df$BsmtHalfBath[is.na(df$BsmtHalfBath)] = mean(df$BsmtHalfBath, na.rm=TRUE)
+  df$GarageCars = as.numeric( as.character( df$GarageCars ) )
+  df$GarageCars[is.na(df$GarageCars)] = mean(df$GarageCars, na.rm=TRUE)
+  df$GarageArea = as.numeric( as.character( df$GarageArea ) )
+  df$GarageArea[is.na(df$GarageArea)] = mean(df$GarageArea, na.rm=TRUE)
+  
+  # Fix missing values
+  df$Utilities.n[is.na(df$Utilities.n)] = 3       # Modal value
+  df$Functional.n[is.na(df$Functional.n)] = 7     # Modal value
+  df$KitchenQual.n[is.na(df$KitchenQual.n)] = 3   # Modal value
+  df$Electrical[df$Electrical=="NA"] = as.factor("SBrkr")
+  
+}
+
+df<-train
+
+#overview
+create_report(train)
+
+plot_bar(train)
+
+#see missing values
+missing_data <- plot_missing(train)
+
+plot_correlation(train & train$SalePrice, maxcat =4)
+
+plot_histogram(train)
+
+#remove missing columns
+train <- data.table(train)
+train<-drop_columns(train, c("PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage", "GarageType","GarageYrBlt", "GarageFinish", "GarageQual"))
+
+#outliers
+summary(train)
+summary(test)
+train <- train[-which(train$GrLivArea > 4000),]
+outlier <- 3000
+train <- train[-which(train$TotalBsmtSF> outlier),]
+outlier <- 100000
+train <- train[-which(train$LotArea>outlier),] 
+outlier <- 200 
+outlier.Id <- c(633, 1325, 463, 971, 689)
+id <- train$Id %in% outlier.Id
+train <- train[!id, ]
+
+train[,logSales:=log1p(SalePrice)]
+
+train<-na.omit(train)
+
+#create validation set
+inTrain <- createDataPartition(y = train$SalePrice, p = 0.7, list = FALSE)
+Training <- train[inTrain, ]
+Validation <- train[-inTrain, ]
+
+#start h2o
+h2o.init(nthreads=-1,max_mem_size='10G')
+trainHex<-as.h2o(train)
+validHex<-as.h2o(Validation)
+h2o.describe(trainHex)
+features<-colnames(train)[!(colnames(train) %in% c("SalePrice","Id", "logSales"))]
+
+rfhex<- h2o.automl(x= features, y = "logSales", training_frame = trainHex, max_runtime_secs=1600, validation_frame= validHex)
+summary(rfhex)
+
+testHex<-as.h2o(test)
+
+## Get predictions out; predicts in H2O, as.data.frame gets them into R
+predictions<-as.data.frame(h2o.predict(rfhex,testHex))
+## Return the predictions to the original scale of the Sales data
+pred <- expm1(predictions[,1])
+summary(predictions)
+submission <- data.frame(Id=test$Id, Sales=pred)
+colnames(submission)<-c("ID", 'SalePrice')
+
+write.csv(submission, "be1.csv",row.names=F)
