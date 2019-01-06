@@ -1,0 +1,78 @@
+library(tidyverse)
+library(lubridate)
+library(scales)
+require(Matrix)
+require(xgboost)
+require(data.table)
+require(dplyr)
+require(caret)
+
+train_df <- read_csv('train.csv')
+test_df <- read_csv('test.csv')
+
+train_df_model <- train_df
+y_train <- train_df_model$y
+train_df_model$y <- NULL
+
+#Row binding train & test set for feature engineering
+train_test <- bind_rows(train_df_model, test_df)
+ntrain <- nrow(train_df_model)
+
+features <- names(train_df)
+
+#convert character into integer
+for (f in features) {
+  if (is.character(train_test[[f]])) {
+    levels = sort(unique(train_test[[f]]))
+    train_test[[f]] = as.integer(factor(train_test[[f]],levels = levels))
+  }
+}
+
+#splitting whole data back again
+train_x <- train_test %>% .[1:ntrain,]
+test_x <- train_test %>% .[(ntrain + 1):nrow(train_test),]
+
+#convert into numeric for XGBoost implementation
+train_x[] <- map(train_x, as.numeric)
+test_x[] <- map(test_x, as.numeric)
+
+dtrain <- xgb.DMatrix(as.matrix(train_x),label = y_train)
+dtest <- xgb.DMatrix(as.matrix(test_x))
+
+##xgboost parameters
+xgb_params <- list(colsample_bytree = 0.1, #how many variables to consider for each tree
+                   subsample = 0.5, #how much of the data to use for each tree
+                   booster = "gbtree",
+                   max_depth = 2, #how many levels in the tree
+                   eta = 0.075, #shrinkage rate to control overfitting through conservative approach
+                   eval_metric = "rmse",
+                   num_parallel_tree = 1,
+                   objective = "reg:linear",
+                   min_child_weight = 4,
+                   gamma = 0)
+
+#params original
+xgb_params <- list(colsample_bytree = 0.7, #how many variables to consider for each tree
+                   subsample = 0.7, #how much of the data to use for each tree
+                   booster = "gbtree",
+                   max_depth = 6, #how many levels in the tree
+                   eta = 0.5, #shrinkage rate to control overfitting through conservative approach
+                   eval_metric = "rmse", 
+                   objective = "reg:linear",
+                   gamma = 0)
+##################################
+
+#cross validation
+xgb_cv <- xgb.cv(xgb_params,dtrain,early_stopping_rounds = 5, nfold = 5, nrounds=500)
+best_nrounds = xgb_cv$best_iteration
+#xgb_cv$evaluation_log %>% select(1,2,4) %>% 
+#gather(type,value, -iter) %>% 
+#ggplot(aes(iter,value)) + geom_line(aes(colour = type))
+
+#train data
+gb_dt <- xgb.train(xgb_params,dtrain,best_nrounds)
+gb_dt$params
+
+test_preds <- predict(gb_dt,dtest)
+test_df[,1]  %>% mutate(y = test_preds)  %>% write_csv('xgb_base_predictions7jun4.csv')
+test_df[,1]  %>% mutate(y = test_preds) %>% head()
