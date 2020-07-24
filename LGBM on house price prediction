@@ -1,0 +1,139 @@
+
+
+### lgbm
+library(data.table)
+library(caret)
+library(tidyverse)
+library(lightgbm)
+
+train <- fread("train.csv", stringsAsFactors = F)
+test  <- fread("test.csv", stringsAsFactors = F)
+
+
+#category to numeric
+cat_features <- train %>%
+  select_if(is.character) %>%
+  names()
+
+# Adapted from Kailex's script: https://www.kaggle.com/kailex/ms-malware-starter/code
+levels <- new.env(hash = TRUE, parent = emptyenv())
+
+for (f in names(train)) 
+  if (!is.numeric(train[[f]])) {
+    levels[[f]] <- sort(unique(train[[f]]))
+    train[, (f) := as.integer(factor(.SD[[f]], levels = levels[[f]]))]
+    invisible(gc()) 
+  }
+
+#na imputation
+impute.mean <- function(x) replace(x, is.na(x) | is.nan(x) | is.infinite(x), mean(x[!is.na(x) & !is.nan(x) & !is.infinite(x)]))
+losses <- apply(fb1, 2, impute.mean)
+sum(apply( losses, 2, function(.) sum(is.infinite(.)) ))
+df<- as.data.frame(losses) 
+
+
+
+train <- train %>% mutate(logSales=log1p(SalePrice))
+
+train<- train %>% select(-Id,Street,-Utilities)
+
+#train<-DataExplorer::drop_columns(train, c("PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage", "GarageType","GarageYrBlt", "GarageFinish", "GarageQual"))
+
+
+train[is.na(train)] <- -9999
+#train<-na.omit(train)
+#train<- train[sapply(train,is.numeric)]  
+
+
+#create validation set
+inTrain <- createDataPartition(y = train$logSales, p = 0.7, list = FALSE)
+Training <- train[inTrain, ]
+Validation <- train[-inTrain, ]
+
+label_train<-Training$logSales
+label_val<-Validation$logSales
+
+Training<-Training %>% select(-logSales,-SalePrice)
+Validation<-Validation %>% select(-logSales,-SalePrice)
+
+lgbtrain = lgb.Dataset(data=as.matrix(Training),label=label_train,categorical_feature = cat_features)
+lgbvalid = lgb.Dataset(data=as.matrix(Validation),label=label_val,categorical_feature = cat_features)
+
+
+grid_search <- expand.grid(
+  num_leaves        = c(3,5,7),
+  max_depth         = c(4,6,8),
+  subsample         = c(0.7,0.5),
+  colsample_bytree  = c(0.3,0.5),
+  min_child_weight  = c(0,0.01),
+  scale_pos_weight  = c(100,300)
+)
+
+model <- list()
+perf <- numeric(nrow(grid_search))
+
+for (i in 1:nrow(grid_search)) {
+  cat("Model ***", i , "*** of ", nrow(grid_search), "\n")
+  model[[i]] <- lgb.train(
+    list(boosting_type = 'gbdt',
+      objective         = "regression",
+         metric            = "rmse",
+         learning_rate     = 0.1,
+         min_child_samples = 100,
+         max_bin           = 100,
+         subsample_freq    = 1,
+         num_leaves        = grid_search[i, "num_leaves"],
+         max_depth         = grid_search[i, "max_depth"],
+         subsample         = grid_search[i, "subsample"],
+         colsample_bytree  = grid_search[i, "colsample_bytree"],
+         min_child_weight  = grid_search[i, "min_child_weight"],
+         scale_pos_weight  = grid_search[i, "scale_pos_weight"]),
+    lgbtrain,
+    valids = list(validation = lgbvalid),
+    nthread = 4, 
+    nrounds = 1000, # increase/ decrease rounds
+    verbose= 1, 
+    early_stopping_rounds = 2
+  )
+  perf[i] <- max(unlist(model[[i]]$record_evals[["validation"]][["auc"]][["eval"]]))
+  invisible(gc()) # free up memory after each model run
+}
+
+cat("Model ", which.max(perf), " is max AUC: ", max(perf), sep = "","\n")
+best_params = grid_search[which.max(perf), ]
+
+
+
+params <- list(objective="regression",
+               metric="rmse",
+               learning_rate=0.1,
+               num_leaves        = 3,
+               max_depth         = 4,
+               subsample         =0.7,
+               colsample_bytree  = 0.3,
+               min_child_weight  = 0,
+               scale_pos_weight  = 100)
+
+
+lgb.model <- lgb.train(params = params,
+                       data = lgbtrain,
+                       valids = list(val = lgbvalid),
+                       learning_rate=0.01,
+                       nrounds=5000,
+                       verbose=1,
+                       early_stopping_rounds=50,
+                       eval_freq=100
+)
+
+lgb.model$best_iter
+lgb.model$best_score
+
+pred <- predict(lgb.model,n = lgb.model$best_iter, as.matrix(test))
+
+## Return the predictions to the original scale of the Sales data
+pred<-as.data.frame(pred)
+pred <- expm1(pred[,1])
+submission <- data.frame(Id=test$Id, Sales=pred)
+colnames(submission)<-c("ID", 'SalePrice')
+
+write.csv(submission, "lgb.csv",row.names=F)
